@@ -1,0 +1,11 @@
+# Mixed reads/writes, same block hits and direct mapping evictions
+R 0x00000000
+R 0x00000004
+W 0x00000010
+R 0x00000000
+W 0x00000040
+R 0x00000000
+R 0x00000020
+W 0x00000024
+R 0x00000030
+R 0x00000034

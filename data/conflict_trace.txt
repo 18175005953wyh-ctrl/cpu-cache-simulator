@@ -1,0 +1,7 @@
+# Two blocks collide with 64 B, 16 B blocks, direct mapping
+R 0x00000000
+R 0x00000040
+R 0x00000000
+R 0x00000040
+R 0x00000000
+R 0x00000040

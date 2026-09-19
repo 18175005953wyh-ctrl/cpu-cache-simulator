@@ -1,0 +1,7 @@
+# Neighboring addresses and repeated accesses
+R 0x00000000
+R 0x00000004
+R 0x00000008
+R 0x00000000
+R 0x00000004
+R 0x00000008
