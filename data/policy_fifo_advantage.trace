@@ -1,0 +1,6 @@
+# A B A C B; same configuration. FIFO retains B when C arrives.
+R 0
+R 40
+R 0
+R 80
+R 40

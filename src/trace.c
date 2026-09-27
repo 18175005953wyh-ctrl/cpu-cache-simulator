@@ -30,11 +30,18 @@ int parse_trace_line(const char *line, MemoryAccess *access) {
 }
 int process_trace_file(Cache *cache, const char *filename, CacheStats *stats) {
     FILE *file = fopen(filename, "rb");
+    int ok;
+    memset(stats, 0, sizeof(*stats));
+    if (!file) { fprintf(stderr, "Error: cannot open trace file: %s\n", filename); return 0; }
+    ok = process_trace_stream(cache, file, stats, 1, 1);
+    if (fclose(file) != 0) { fprintf(stderr, "Error: failed to close trace file.\n"); ok = 0; }
+    return ok;
+}
+int process_trace_stream(Cache *cache, FILE *file, CacheStats *stats, int verbose, int warnings) {
     char line[1024];
     uint64_t line_number = 0;
     int ch, ok = 1;
     memset(stats, 0, sizeof(*stats));
-    if (!file) { fprintf(stderr, "Error: cannot open trace file: %s\n", filename); return 0; }
     /* Read bytes into a bounded line buffer, so embedded NUL cannot hide suffixes. */
     while ((ch = fgetc(file)) != EOF) {
         size_t length = 0;
@@ -50,7 +57,7 @@ int process_trace_file(Cache *cache, const char *filename, CacheStats *stats) {
         } while ((ch = fgetc(file)) != EOF);
         line[length] = '\0';
         parsed = invalid ? -1 : parse_trace_line(line, &access);
-        if (parsed < 0) { fprintf(stderr, "Warning: line %" PRIu64 ": invalid or overlong trace record; skipped.\n", line_number); continue; }
+        if (parsed < 0) { if (warnings) fprintf(stderr, "Warning: line %" PRIu64 ": invalid or overlong trace record; skipped.\n", line_number); continue; }
         if (!parsed) continue;
         if (cache->clock == UINT64_MAX || stats->total_accesses == UINT64_MAX) {
             fprintf(stderr, "Error: access counter limit reached.\n"); ok = 0; break;
@@ -60,12 +67,11 @@ int process_trace_file(Cache *cache, const char *filename, CacheStats *stats) {
         if (access.type == ACCESS_READ) ++stats->read_accesses; else ++stats->write_accesses;
         if (result.hit) ++stats->hits; else ++stats->misses;
         if (result.eviction) ++stats->evictions;
-        printf("#%" PRIu64 " %c 0x%016" PRIx64 " -> %s%s | set=%zu tag=0x%" PRIx64 " offset=%zu\n",
+        if (verbose) printf("#%" PRIu64 " %c 0x%016" PRIx64 " -> %s%s | set=%zu tag=0x%" PRIx64 " offset=%zu\n",
             stats->total_accesses, access.type == ACCESS_READ ? 'R' : 'W', access.address,
             result.hit ? "HIT" : "MISS", result.eviction ? " EVICTION" : "",
             result.set_index, result.tag, result.block_offset);
     }
     if (ferror(file)) { fprintf(stderr, "Error: failed to read trace file.\n"); ok = 0; }
-    if (fclose(file) != 0) { fprintf(stderr, "Error: failed to close trace file.\n"); ok = 0; }
     return ok;
 }

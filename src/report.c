@@ -4,6 +4,8 @@
 #include <time.h>
 
 static void configuration(FILE *out, const Cache *c) {
+    fprintf(out, "Replacement policy: %s\n", cache_policy_name(c->policy));
+    if (c->associativity == 1) fprintf(out, "Direct mapped: replacement policy does not affect results.\n");
     fprintf(out, "Cache size:        %zu bytes\nBlock size:        %zu bytes\nAssociativity:     %zu\nCache lines:       %zu\nNumber of sets:    %zu\nOffset bits:       %u\nIndex bits:        %u\n",
         c->cache_size, c->block_size, c->associativity, c->line_count, c->set_count, c->offset_bits, c->index_bits);
 }
@@ -18,6 +20,34 @@ static void summary(FILE *out, const Cache *c, const CacheStats *s) {
 }
 void print_configuration(const Cache *cache) { configuration(stdout, cache); }
 void print_summary(const Cache *cache, const CacheStats *stats) { summary(stdout, cache, stats); }
+static void comparison_row(FILE *out, const char *policy, const CacheStats *s, int csv) {
+    if (csv) {
+        fprintf(out, "%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",", policy, s->total_accesses, s->hits, s->misses, s->evictions);
+        if (s->total_accesses) fprintf(out, "%.9f", (double)s->hits / (double)s->total_accesses);
+        fputc('\n', out);
+    } else {
+        fprintf(out, "%-6s  %8" PRIu64 "  %8" PRIu64 "  %8" PRIu64 "  %9" PRIu64 "  ", policy, s->total_accesses, s->hits, s->misses, s->evictions);
+        if (s->total_accesses) fprintf(out, "%7.2f%%\n", 100.0 * (double)s->hits / (double)s->total_accesses);
+        else fprintf(out, "     N/A\n");
+    }
+}
+void print_comparison(const CacheStats *lru, const CacheStats *fifo) {
+    puts("\nPolicy  Accesses      Hits    Misses  Evictions  Hit Rate");
+    comparison_row(stdout, "LRU", lru, 0);
+    comparison_row(stdout, "FIFO", fifo, 0);
+}
+int write_comparison_csv(const char *filename, const CacheStats *lru, const CacheStats *fifo) {
+    FILE *out = fopen(filename, "wx");
+    int ok;
+    if (!out) { fprintf(stderr, "Error: cannot create CSV; use a new filename and existing parent directory.\n"); return 0; }
+    fputs("policy,accesses,hits,misses,evictions,hit_rate\n", out);
+    comparison_row(out, "LRU", lru, 1);
+    comparison_row(out, "FIFO", fifo, 1);
+    ok = !ferror(out);
+    if (fclose(out) != 0) ok = 0;
+    if (!ok) fprintf(stderr, "Error: failed to write complete CSV.\n");
+    return ok;
+}
 int write_report(const char *filename, const Cache *cache, const CacheStats *stats, const char *trace_filename) {
     FILE *file = fopen(filename, "wx");
     time_t now = time(NULL);
@@ -28,7 +58,7 @@ int write_report(const char *filename, const Cache *cache, const CacheStats *sta
     if (!file) { fprintf(stderr, "Error: cannot create report. Use a new filename and check the parent directory and permissions.\n"); return 0; }
     for (p = trace_filename; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
     if (utc) (void)strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S UTC", utc);
-    fprintf(file, "CPU Cache Simulator\nSimulation time: %s\nTrace file: %s\nPolicy: LRU, write allocate; no data or dirty bits\n", stamp, base);
+    fprintf(file, "CPU Cache Simulator\nSimulation time: %s\nTrace file: %s\nPolicy: %s, write allocate; no data or dirty bits\n", stamp, base, cache_policy_name(cache->policy));
     summary(file, cache, stats);
     ok = !ferror(file);
     if (fclose(file) != 0) ok = 0;

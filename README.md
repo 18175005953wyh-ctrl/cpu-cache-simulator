@@ -1,6 +1,6 @@
-# CPU Cache Simulator
+# CPU Cache Simulator v1.1
 
-使用 C11 编写的命令行 Cache 模拟器，读取十六进制访存记录，展示地址映射、Hit/Miss、LRU 替换和统计报告。
+使用 C11 编写的命令行 Cache 模拟器，读取十六进制访存记录，展示地址映射、Hit/Miss、LRU/FIFO 替换和同配置对照报告。
 
 ## 项目背景与学习目标
 
@@ -11,7 +11,8 @@
 ## 功能
 
 - 可配置容量、块大小、相联度；支持直接映射、N 路组相联，以及组数为 1 时的全相联。
-- 使用有效位、Tag 和最近访问时间戳实现 LRU；先填空行，只有替换有效行才计 eviction。
+- 支持 LRU（默认）和 FIFO；先填空行，只有替换有效行才计 eviction。
+- 支持同一 Trace 的独立冷缓存对照运行，输出表格和可选 CSV。
 - R/W 都会更新 LRU；写缺失按**写分配**载入块。不模拟写直达、脏位或写回流量。
 - 每条有效访问显示序号、类型、64 位地址、命中/缺失、替换、组索引、Tag 和偏移。
 - 统计读写次数、Hit、Miss、Eviction 及比例，支持带 UTC 时间的文本报告。
@@ -56,6 +57,76 @@ Tag      = 块号 / set_count
 每次访问最多扫描组内 E 行，时间复杂度 O(E)；M 次访问的核心计算为 O(ME)。
 初始化 O(L)，元数据空间 O(L)，L 为总行数；Trace 逐行处理，不整体载入内存。
 
+## Replacement Policies
+
+### LRU
+
+`--policy lru` 淘汰 `last_used` 最小的有效行。命中和装入都刷新最近访问时间；省略策略参数以及原来的 `cache_init()` 均保持 LRU。
+
+### FIFO
+
+`--policy fifo` 淘汰 `inserted_at` 最小的有效行。仅装入新块时记录进入时间，命中绝不刷新进入时间。两者都优先使用无效行；`select_victim()` 只选行，不更改计数。
+
+### Key Difference
+
+LRU 关注“上次使用”，FIFO 关注“本次进入”。命中说明块又被使用了，但它没有重新进入缓存，所以不能刷新 FIFO 的装入时间。共享代码仍维护 `last_used`，FIFO 选择受害行时只看 `inserted_at`。
+
+每次有效访问只递增一次 `uint64_t` 时钟。直接映射只有一个候选行，接受两种策略参数，但结果不会受策略影响。
+
+## Policy Comparison
+
+### Reproduction Command
+
+完成上面的构建步骤后，在项目目录运行（若使用 `build-v11`，将下面的 `build` 换成 `build-v11`）：
+
+```bat
+build\cpu_cache_simulator.exe --sets 4 --ways 2 --block-size 16 --policy lru data/policy_difference.trace
+build\cpu_cache_simulator.exe --sets 4 --ways 2 --block-size 16 --policy fifo data/policy_difference.trace
+build\cpu_cache_simulator.exe --sets 4 --ways 2 --block-size 16 --compare-policies data/policy_difference.trace --csv output/policy_comparison.csv
+build\cpu_cache_simulator.exe --sets 4 --ways 2 --block-size 16 --compare-policies data/policy_fifo_advantage.trace
+build\cpu_cache_simulator.exe --sets 4 --ways 2 --block-size 16 --compare-policies data/policy_equal.trace
+```
+
+程序名称保留 `cpu_cache_simulator`，原有 `--cache-size`、`--associativity`、`--trace` 参数继续可用。CSV 路径必须尚不存在。
+
+### Fixed Cache Configuration
+
+128 字节容量，4 组，每组 2 行，块大小 16 字节；初始为空，读写缺失均分配块，不模拟脏位或写回。比较前把输入复制到临时文件，再依次新建、运行、销毁两个缓存。非法记录只警告一次，两次运行跳过相同记录；不能继承前一次的缓存内容或计数。
+
+### Trace Description
+
+令 A = `0x00`、B = `0x40`、C = `0x80`。块号为 0、4、8，都映射到组 0，因此即使其他组空闲，这三个块也争用同组的两行。
+
+- `policy_difference.trace`：A B A C A，共 5 次读访问。
+- `policy_fifo_advantage.trace`：A B A C B，共 5 次读访问。
+- `policy_equal.trace`：A B A B，共 4 次读访问。
+
+### Actual Results
+
+2026-09-27 使用本版本实际运行，`policy_difference.trace` 输出：
+
+| Policy | Hits | Misses | Evictions | Hit Rate |
+|---|---:|---:|---:|---:|
+| LRU | 2 | 3 | 1 | 40.00% |
+| FIFO | 1 | 4 | 2 | 20.00% |
+
+另外两组实际结果：
+
+| Trace | Policy | Accesses | Hits | Misses | Evictions | Hit Rate |
+|---|---|---:|---:|---:|---:|---:|
+| FIFO 占优 | LRU | 5 | 1 | 4 | 2 | 20.00% |
+| FIFO 占优 | FIFO | 5 | 2 | 3 | 1 | 40.00% |
+| 相同结果 | LRU | 4 | 2 | 2 | 0 | 50.00% |
+| 相同结果 | FIFO | 4 | 2 | 2 | 0 | 50.00% |
+
+CSV 中 `hit_rate` 是 0～1 的比例，例如 `0.400000000`，终端是百分数。无有效访问时终端显示 N/A、CSV 比例字段留空，避免把未定义比例当成 0%。
+
+### Result Analysis
+
+前两次访问装入 A 和 B。第三次 A 命中：LRU 将 A 标为最近使用；FIFO 中 A 仍是最早进入。第四次访问 C 缺失时，LRU 淘汰 B，FIFO 淘汰 A。因此第五次若访问 A，LRU 命中而 FIFO 缺失；若改为 B，结论正好反转。相同结果序列只用两个块，不触发替换，因而两者相同。
+
+这些短序列用于揭示机制，不能代表真实工作负载整体表现，更不能推出 LRU 总是优于 FIFO。
+
 ## 目录结构
 
 ```text
@@ -72,7 +143,7 @@ cpu-cache-simulator/
 └── README.md
 ```
 
-`main.c` 解析参数并连接各模块；`cache.c` 负责映射和 LRU；`trace.c` 负责记录校验、模拟和计数；`report.c` 负责输出。头文件只放类型和声明。
+`main.c` 解析参数、固定对照输入并连接各模块；`cache.c` 负责映射和 LRU/FIFO；`trace.c` 负责记录校验、模拟和计数；`report.c` 负责输出。头文件只放类型和声明。
 
 ## 技术与构建环境
 
@@ -128,11 +199,16 @@ ctest --test-dir build --output-on-failure
 | `--cache-size` | 模拟的数据容量，字节，不含元数据 |
 | `--block-size` | 块大小，字节，正的 2 次幂 |
 | `--associativity` | 每组行数，正整数 |
-| `--trace` | 必填，访存记录路径 |
+| `--trace` | 访存记录路径，也可直接提供一个位置参数 |
+| `--sets` | 组数，与 `--cache-size` 二选一；容量 = 组数 × 路数 × 块大小 |
+| `--ways` | `--associativity` 的别名，不可重复提供 |
+| `--policy` | 只接受小写 `lru` 或 `fifo`，默认 `lru` |
+| `--compare-policies` | 用同配置、同输入分别运行 LRU/FIFO，不与 `--policy`、`--report` 混用 |
+| `--csv` | 仅用于比较模式，新 CSV 文件路径 |
 | `--report` | 可选，新报告文件路径 |
 | `--help` | 单独使用，显示帮助 |
 
-前三项使用十进制正整数，不接受符号、小数或后缀。所有必填项都必须出现；重复、未知及缺值参数返回非零。
+容量或组数、块大小、路数使用十进制正整数，不接受符号、小数或后缀。缓存配置与 Trace 都必须提供；重复、未知及缺值参数返回非零。
 容量须整除块大小，总行数须整除相联度，组数须为正的 2 次幂。最多 1,048,576 行，分配失败给出错误。
 相对文件路径从**启动程序时的工作目录**解析，程序不会自动搜索 Trace。
 
@@ -202,36 +278,39 @@ Miss rate:         60.00%
 `--report output/report.txt` 写入 UTC 模拟完成时间、Trace 的文件名、策略、配置和完整统计。不会写入开发机器路径；Trace 参数即使是绝对路径，报告也只保留文件名。
 使用 C11 独占创建模式，**已有文件不覆盖**，再次运行换成 `output/report-2.txt` 等新文件名。这样也不会因路径别名而覆盖 Trace。
 不自动创建父目录；仓库提供 `output/`，其他目录需自行创建。无法创建、写入或关闭文件时给出明确提示和非零退出码。写入失败可能留下不完整报告，应删除后重试。
-生成的 `output/*.txt` 被忽略。将自己截取的真实界面放进 `screenshots/`；目前只有占位文件，没有虚构截图。
+生成的 `output/*.txt` 和 `output/*.csv` 被忽略。真实界面截图位于 `screenshots/`；旧版截图不代表 v1.1 的对照结果。
 
-## 自动化测试与实际验证
+## Test Coverage
 
 测试不依赖第三方框架，使用会在 Release 模式下保留的 CHECK 宏；失败返回非零，CTest 能发现失败。
 
-2026-09-19 实测：**36 项 C 测试 + 24 项命令行测试全部通过**，CTest 两个测试入口均通过。
-其中一个 C 测试用独立的“最近访问块列表”模型核对 1～4 路共 4000 次访问的 Hit 与 Eviction，避免只复述时间戳实现。
+2026-09-27 在 Windows x64、MSVC 19.44、NMake Debug、`/W4 /WX` 下实测：**52 项 C 测试 + 47 项命令行测试全部通过**，CTest 两个入口均通过。原有 36 + 24 项保留；新增 16 + 23 项。
 
-覆盖配置、64 位最大地址、首次缺失、同块命中、组隔离、空行填充、LRU 命中更新、三路全相联、写分配统计、不合法行、超长行、嵌入 NUL、空数据、无有效记录、计数溢出保护、报告生成及拒绝覆盖。
-命令行测试另覆盖缺失参数、重复参数、负数、数值溢出、错误文件路径和报告父目录不存在。
+- FIFO 空行优先、最早进入者淘汰、命中保留装入时间、新装入时间刷新。
+- LRU 命中刷新最近访问时间、默认 LRU、非法策略及大小写拒绝。
+- 直接映射一致、单次访问、空 Trace、独立冷缓存、三种对照结果与 CSV 精确核对。
+- 参数溢出、参数冲突、文件错误、CSV/文本报告拒绝覆盖。
+- 原有配置、映射、解析、写分配统计和时间戳溢出保护测试继续通过。
+- 独立 LRU 列表模型与 FIFO 队列模型各核对 1～4 路共 4000 次访问。FIFO 参考模型不使用时间戳；同时验证 `hits + misses == accesses`、`evictions <= misses` 和每次访问时钟仅加一。
 
-实际从仓库根目录执行的构建/测试命令（在已加载 MSVC 环境中）：
+在项目目录、已加载 MSVC 环境的终端中复现：
 
 ```bat
-cmake -S cpu-cache-simulator -B work/cache-nmake -G "NMake Makefiles" -DSTRICT_WARNINGS=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build work/cache-nmake
-ctest --test-dir work/cache-nmake --output-on-failure
+cmake -S . -B build-v11 -G "NMake Makefiles" -DSTRICT_WARNINGS=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-v11
+ctest --test-dir build-v11 --output-on-failure
 ```
 
-构建目录位于仓库忽略的 `work/cache-nmake` 下，不纳入项目提交；复现时也可按前面命令重新构建。在构建目录直接运行 `cache_tests.exe` 也能测试，测试会在当前目录创建并清理 `test-trace.tmp` 和 `test-report.tmp`。
+构建目录被忽略，不纳入提交。测试在测试工作目录内创建并清理临时文件。
 
 ## 当前限制与改进方向
 
 - 每条记录只代表对一个地址所在块的一次访问，不包含访问长度和跨块拆分。
 - 只模拟一个 Cache 层级，初始为空；不保存数据，不模拟脏位、写回、时延、一致性和地址转换。
 - 所有缺失统一计为 Miss，尚未区分冷、容量与冲突缺失；报告不包含逐条记录，终端包含。
-- 最多 1,048,576 行；最多处理 UINT64_MAX 次有效访问，达到时钟上限后明确停止，避免 LRU 时间戳回绕。
+- 最多 1,048,576 行；最多处理 UINT64_MAX 次有效访问，达到时钟上限后明确停止，避免 LRU/FIFO 时间戳回绕。
 - 库接口要求先初始化、用后销毁；重新初始化前需先销毁。直接调用 `cache_access` 时调用方须保证时钟尚未到上限，文件处理函数已经检查。
-- 后续可加入 FIFO/随机替换、写直达与写回、脏位、多级 Cache、平均访存时间和配置对比图表。
+- 对照模式需要可写的系统临时目录及容纳 Trace 快照的磁盘空间；两次扫描共享快照，逐行解析，内存不随 Trace 大小增长。
 
 ## 练习到的能力
 
@@ -249,4 +328,4 @@ ctest --test-dir work/cache-nmake --output-on-failure
 7. **组相联的优缺点？** 同组能保存多个块，减少部分冲突；但需更多比较和替换管理，并非相联度越高就一定更快。
 8. **LRU 为什么记录最近使用时间？** 需要区分谁最久未被访问，满组时才知道替换谁。只更新缺失而不更新命中会变成错误策略。
 9. **时间复杂度是多少？** 每次访问组内最多检查 E 行，为 O(E)，不是所有配置都 O(1)。处理 M 次访问为 O(ME)，另有文本读取和输出成本。
-10. **如何升级？** 可先实现 FIFO 并用同一 Trace 对比，再添加脏位、写策略、多级缓存或带延迟参数的平均访存时间。
+10. **如何升级？** v1.1 已实现 FIFO 与对照实验；下一步先解释已有实验与局限，再考虑新的模拟维度。
