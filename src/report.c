@@ -20,6 +20,34 @@ static void summary(FILE *out, const Cache *c, const CacheStats *s) {
 }
 void print_configuration(const Cache *cache) { configuration(stdout, cache); }
 void print_summary(const Cache *cache, const CacheStats *stats) { summary(stdout, cache, stats); }
+static void comparison_row(FILE *out, const char *policy, const CacheStats *s, int csv) {
+    if (csv) {
+        fprintf(out, "%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",", policy, s->total_accesses, s->hits, s->misses, s->evictions);
+        if (s->total_accesses) fprintf(out, "%.9f", (double)s->hits / (double)s->total_accesses);
+        fputc('\n', out);
+    } else {
+        fprintf(out, "%-6s  %8" PRIu64 "  %8" PRIu64 "  %8" PRIu64 "  %9" PRIu64 "  ", policy, s->total_accesses, s->hits, s->misses, s->evictions);
+        if (s->total_accesses) fprintf(out, "%7.2f%%\n", 100.0 * (double)s->hits / (double)s->total_accesses);
+        else fprintf(out, "     N/A\n");
+    }
+}
+void print_comparison(const CacheStats *lru, const CacheStats *fifo) {
+    puts("\nPolicy  Accesses      Hits    Misses  Evictions  Hit Rate");
+    comparison_row(stdout, "LRU", lru, 0);
+    comparison_row(stdout, "FIFO", fifo, 0);
+}
+int write_comparison_csv(const char *filename, const CacheStats *lru, const CacheStats *fifo) {
+    FILE *out = fopen(filename, "wx");
+    int ok;
+    if (!out) { fprintf(stderr, "Error: cannot create CSV; use a new filename and existing parent directory.\n"); return 0; }
+    fputs("policy,accesses,hits,misses,evictions,hit_rate\n", out);
+    comparison_row(out, "LRU", lru, 1);
+    comparison_row(out, "FIFO", fifo, 1);
+    ok = !ferror(out);
+    if (fclose(out) != 0) ok = 0;
+    if (!ok) fprintf(stderr, "Error: failed to write complete CSV.\n");
+    return ok;
+}
 int write_report(const char *filename, const Cache *cache, const CacheStats *stats, const char *trace_filename) {
     FILE *file = fopen(filename, "wx");
     time_t now = time(NULL);
