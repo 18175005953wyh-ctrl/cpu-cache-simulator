@@ -26,13 +26,21 @@ const char *cache_validate(size_t capacity, size_t block, size_t ways) {
     return NULL;
 }
 int cache_init(Cache *cache, size_t capacity, size_t block, size_t ways) {
+    return cache_init_policy(cache, capacity, block, ways, REPLACEMENT_LRU);
+}
+const char *cache_policy_name(ReplacementPolicy policy) {
+    return policy == REPLACEMENT_FIFO ? "FIFO" : "LRU";
+}
+int cache_init_policy(Cache *cache, size_t capacity, size_t block, size_t ways, ReplacementPolicy policy) {
     memset(cache, 0, sizeof(*cache));
+    if (policy != REPLACEMENT_LRU && policy != REPLACEMENT_FIFO) return 0;
     if (cache_validate(capacity, block, ways)) return 0;
     cache->lines = calloc(capacity / block, sizeof(*cache->lines));
     if (!cache->lines) return 0;
     cache->cache_size = capacity; cache->block_size = block; cache->associativity = ways;
     cache->line_count = capacity / block; cache->set_count = cache->line_count / ways;
     cache->offset_bits = integer_log2(block); cache->index_bits = integer_log2(cache->set_count);
+    cache->policy = policy;
     return 1;
 }
 void cache_destroy(Cache *cache) { free(cache->lines); memset(cache, 0, sizeof(*cache)); }
@@ -42,12 +50,13 @@ void decode_address(const Cache *cache, uint64_t address, size_t *set, uint64_t 
     *tag = block / cache->set_count;
     *offset = (size_t)(address % cache->block_size);
 }
-size_t select_victim(const CacheLine *lines, size_t ways) {
+size_t select_victim(const CacheLine *lines, size_t ways, ReplacementPolicy policy) {
     size_t i, oldest = 0;
     for (i = 0; i < ways; ++i) {
         if (!lines[i].valid) return i;
-        /* The smallest timestamp is the least recently accessed line. */
-        if (lines[i].last_used < lines[oldest].last_used) oldest = i;
+        uint64_t age = policy == REPLACEMENT_FIFO ? lines[i].inserted_at : lines[i].last_used;
+        uint64_t oldest_age = policy == REPLACEMENT_FIFO ? lines[oldest].inserted_at : lines[oldest].last_used;
+        if (age < oldest_age) oldest = i;
     }
     return oldest;
 }
@@ -63,8 +72,9 @@ AccessResult cache_access(Cache *cache, uint64_t address) {
             result.hit = 1; lines[i].last_used = cache->clock; return result;
         }
     }
-    i = select_victim(lines, cache->associativity);
+    i = select_victim(lines, cache->associativity, cache->policy);
     result.eviction = lines[i].valid;
     lines[i].valid = 1; lines[i].tag = result.tag; lines[i].last_used = cache->clock;
+    lines[i].inserted_at = cache->clock;
     return result;
 }

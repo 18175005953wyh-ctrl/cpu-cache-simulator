@@ -4,6 +4,8 @@
 #include <time.h>
 
 static void configuration(FILE *out, const Cache *c) {
+    fprintf(out, "Replacement policy: %s\n", cache_policy_name(c->policy));
+    if (c->associativity == 1) fprintf(out, "Direct mapped: replacement policy does not affect results.\n");
     fprintf(out, "Cache size:        %zu bytes\nBlock size:        %zu bytes\nAssociativity:     %zu\nCache lines:       %zu\nNumber of sets:    %zu\nOffset bits:       %u\nIndex bits:        %u\n",
         c->cache_size, c->block_size, c->associativity, c->line_count, c->set_count, c->offset_bits, c->index_bits);
 }
@@ -28,7 +30,7 @@ int write_report(const char *filename, const Cache *cache, const CacheStats *sta
     if (!file) { fprintf(stderr, "Error: cannot create report. Use a new filename and check the parent directory and permissions.\n"); return 0; }
     for (p = trace_filename; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
     if (utc) (void)strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S UTC", utc);
-    fprintf(file, "CPU Cache Simulator\nSimulation time: %s\nTrace file: %s\nPolicy: LRU, write allocate; no data or dirty bits\n", stamp, base);
+    fprintf(file, "CPU Cache Simulator\nSimulation time: %s\nTrace file: %s\nPolicy: %s, write allocate; no data or dirty bits\n", stamp, base, cache_policy_name(cache->policy));
     summary(file, cache, stats);
     ok = !ferror(file);
     if (fclose(file) != 0) ok = 0;

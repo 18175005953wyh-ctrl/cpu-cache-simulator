@@ -5,6 +5,7 @@
 #include <string.h>
 
 static void help(void) {
+    puts("Optional replacement policy: --policy lru|fifo (lowercase; default lru).");
     puts("CPU Cache Simulator\nUsage: cpu_cache_simulator --cache-size BYTES --block-size BYTES\n       --associativity WAYS --trace FILE [--report FILE]\n       cpu_cache_simulator --help\nUse positive decimal sizes. Trace: R/W followed by a hexadecimal address.\nCreate the report parent directory before running. Use a new report filename.");
 }
 static int parse_size(const char *s, size_t *value) {
@@ -21,8 +22,9 @@ static int parse_size(const char *s, size_t *value) {
     *value = n; return 1;
 }
 int main(int argc, char **argv) {
-    const char *names[] = {"--cache-size", "--block-size", "--associativity", "--trace", "--report"};
-    const char *values[5] = {0};
+    const char *names[] = {"--cache-size", "--block-size", "--associativity", "--trace", "--report", "--policy"};
+    const char *values[6] = {0};
+    ReplacementPolicy policy = REPLACEMENT_LRU;
     const char *error;
     size_t capacity, block, ways;
     Cache cache;
@@ -30,8 +32,8 @@ int main(int argc, char **argv) {
     int i, j, ok;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) { help(); return 0; }
     for (i = 1; i < argc; i += 2) {
-        for (j = 0; j < 5; ++j) if (strcmp(argv[i], names[j]) == 0) break;
-        if (j == 5 || i + 1 == argc || values[j] || !argv[i + 1][0]) {
+        for (j = 0; j < 6; ++j) if (strcmp(argv[i], names[j]) == 0) break;
+        if (j == 6 || i + 1 == argc || values[j] || !argv[i + 1][0]) {
             fprintf(stderr, "Error: unknown, duplicate or incomplete option: %s\n", argv[i]); help(); return 1;
         }
         values[j] = argv[i + 1];
@@ -42,8 +44,12 @@ int main(int argc, char **argv) {
     }
     error = cache_validate(capacity, block, ways);
     if (error) { fprintf(stderr, "Error: %s\n", error); return 1; }
+    if (values[5]) {
+        if (strcmp(values[5], "fifo") == 0) policy = REPLACEMENT_FIFO;
+        else if (strcmp(values[5], "lru") != 0) { fprintf(stderr, "Error: policy must be lowercase lru or fifo.\n"); return 1; }
+    }
     if (values[4] && strcmp(values[3], values[4]) == 0) { fprintf(stderr, "Error: report and trace paths must differ.\n"); return 1; }
-    if (!cache_init(&cache, capacity, block, ways)) { fprintf(stderr, "Error: cannot allocate cache metadata.\n"); return 1; }
+    if (!cache_init_policy(&cache, capacity, block, ways, policy)) { fprintf(stderr, "Error: cannot allocate cache metadata.\n"); return 1; }
     print_configuration(&cache);
     ok = process_trace_file(&cache, values[3], &stats);
     if (ok) {
