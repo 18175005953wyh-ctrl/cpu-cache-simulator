@@ -21,6 +21,8 @@ const char *cache_validate(size_t capacity, size_t block, size_t ways);
 int cache_init(Cache *cache, size_t capacity, size_t block, size_t ways);
 void cache_destroy(Cache *cache);
 void decode_address(const Cache *cache, uint64_t address, size_t *set, uint64_t *tag, size_t *offset);
+/* Requires ways > 0. Selects an empty line first; does not mutate state. */
+size_t select_victim(const CacheLine *lines, size_t ways);
 /* Requires an initialized cache and clock < UINT64_MAX. */
 AccessResult cache_access(Cache *cache, uint64_t address);
 #endif

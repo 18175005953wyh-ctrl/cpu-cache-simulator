@@ -42,7 +42,7 @@ void decode_address(const Cache *cache, uint64_t address, size_t *set, uint64_t 
     *tag = block / cache->set_count;
     *offset = (size_t)(address % cache->block_size);
 }
-static size_t find_replacement(const CacheLine *lines, size_t ways) {
+size_t select_victim(const CacheLine *lines, size_t ways) {
     size_t i, oldest = 0;
     for (i = 0; i < ways; ++i) {
         if (!lines[i].valid) return i;
@@ -63,7 +63,7 @@ AccessResult cache_access(Cache *cache, uint64_t address) {
             result.hit = 1; lines[i].last_used = cache->clock; return result;
         }
     }
-    i = find_replacement(lines, cache->associativity);
+    i = select_victim(lines, cache->associativity);
     result.eviction = lines[i].valid;
     lines[i].valid = 1; lines[i].tag = result.tag; lines[i].last_used = cache->clock;
     return result;
