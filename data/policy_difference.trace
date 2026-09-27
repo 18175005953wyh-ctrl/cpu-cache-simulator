@@ -1,0 +1,6 @@
+# A B A C A; sets=4 ways=2 block-size=16. All blocks map to set 0.
+R 0
+R 40
+R 0
+R 80
+R 0

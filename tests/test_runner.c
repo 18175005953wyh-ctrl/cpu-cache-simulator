@@ -136,8 +136,85 @@ static void file_tests(void) {
     CHECK("timestamp overflow is stopped", !process_trace_file(&c, "test-trace.tmp", &s) && s.total_accesses == 0);
     cache_destroy(&c); remove("test-trace.tmp"); remove("test-report.tmp");
 }
+static void policy_tests(void) {
+    Cache f, l;
+    CacheLine lines[3] = {{1, 0, 30, 1}, {0, 0, 0, 0}, {1, 1, 10, 2}};
+    CacheLine before[3];
+    uint64_t inserted;
+    int same = 1, step;
+    memcpy(before, lines, sizeof(lines));
+    CHECK("FIFO empty line first", select_victim(lines, 3, REPLACEMENT_FIFO) == 1);
+    CHECK("victim selection has no side effects", memcmp(lines, before, sizeof(lines)) == 0);
+    lines[1].valid = 1; lines[1].inserted_at = 3; lines[1].last_used = 20;
+    CHECK("FIFO oldest insertion", select_victim(lines, 3, REPLACEMENT_FIFO) == 0);
+    CHECK("LRU oldest access", select_victim(lines, 3, REPLACEMENT_LRU) == 2);
+    CHECK("invalid policy rejected", !cache_init_policy(&f, 32, 16, 2, (ReplacementPolicy)99) && f.lines == NULL);
+    if (!cache_init_policy(&f, 32, 16, 2, REPLACEMENT_FIFO)) { CHECK("FIFO allocation", 0); return; }
+    CHECK("FIFO single access no eviction", !cache_access(&f, 0).eviction && f.clock == 1);
+    inserted = f.lines[0].inserted_at;
+    (void)cache_access(&f, 16);
+    CHECK("FIFO hit recognized", cache_access(&f, 0).hit);
+    CHECK("FIFO hit preserves insertion", f.lines[0].inserted_at == inserted && f.clock == 3);
+    CHECK("FIFO evicts despite recent hit", cache_access(&f, 32).eviction && f.lines[0].tag == 2);
+    CHECK("replacement receives fresh insertion time", f.lines[0].inserted_at == 4);
+    CHECK("FIFO retains later arrival", cache_access(&f, 16).hit);
+    cache_destroy(&f);
+    if (!cache_init(&l, 32, 16, 2)) { CHECK("LRU allocation", 0); return; }
+    CHECK("API defaults to LRU", l.policy == REPLACEMENT_LRU);
+    (void)cache_access(&l, 0); (void)cache_access(&l, 16); (void)cache_access(&l, 0);
+    CHECK("LRU hit refreshes recency only", l.lines[0].last_used == 3 && l.lines[0].inserted_at == 1);
+    (void)cache_access(&l, 32);
+    CHECK("LRU retains recently used block", cache_access(&l, 0).hit);
+    cache_destroy(&l);
+    if (!cache_init(&l, 64, 16, 1)) { CHECK("direct LRU allocation", 0); return; }
+    if (!cache_init_policy(&f, 64, 16, 1, REPLACEMENT_FIFO)) { cache_destroy(&l); CHECK("direct FIFO allocation", 0); return; }
+    for (step = 0; step < 100; ++step) {
+        uint64_t address = (uint64_t)((step * 17) % 13) * 16;
+        AccessResult a = cache_access(&l, address), b = cache_access(&f, address);
+        if (a.hit != b.hit || a.eviction != b.eviction) same = 0;
+    }
+    CHECK("direct mapped policies identical", same);
+    cache_destroy(&f); cache_destroy(&l);
+}
+static void fifo_reference_test(void) {
+    size_t ways;
+    int ok = 1;
+    /* Independent FIFO model: per-set queue, hits never reorder entries. */
+    for (ways = 1; ways <= 4; ++ways) {
+        uint64_t queue[4][4] = {{0}};
+        size_t used[4] = {0};
+        uint32_t seed = 17;
+        uint64_t hits = 0, misses = 0, evictions = 0;
+        Cache c;
+        int step;
+        if (!cache_init_policy(&c, 4 * ways * 16, 16, ways, REPLACEMENT_FIFO)) { ok = 0; break; }
+        for (step = 0; step < 1000; ++step) {
+            uint64_t address, block;
+            size_t set, pos, move;
+            int hit, eviction;
+            AccessResult r;
+            seed = seed * UINT32_C(1664525) + UINT32_C(1013904223);
+            address = (seed >> 8) % 1024; block = address / 16; set = (size_t)(block % 4);
+            for (pos = 0; pos < used[set]; ++pos) if (queue[set][pos] == block) break;
+            hit = pos < used[set]; eviction = !hit && used[set] == ways;
+            if (!hit) {
+                if (eviction) { for (move = 1; move < ways; ++move) queue[set][move - 1] = queue[set][move]; }
+                else ++used[set];
+                queue[set][used[set] - 1] = block;
+            }
+            r = cache_access(&c, address);
+            if (r.hit != hit || r.eviction != eviction) ok = 0;
+            if (r.hit) ++hits; else ++misses;
+            if (r.eviction) ++evictions;
+        }
+        if (hits + misses != 1000 || evictions > misses || c.clock != 1000) ok = 0;
+        cache_destroy(&c);
+    }
+    CHECK("4000 accesses match independent FIFO queue and invariants", ok);
+}
 int main(void) {
     configuration_tests(); mapping_tests(); associative_tests(); parsing_tests(); reference_test(); file_tests();
+    policy_tests(); fifo_reference_test();
     printf("\n%d tests passed, %d tests failed.\n", tests - failures, failures);
     return failures ? 1 : 0;
 }
