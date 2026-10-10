@@ -13,13 +13,16 @@ if(BUILD_TESTING)
     add_executable(cache_tests tests/test_runner.c)
     target_link_libraries(cache_tests PRIVATE cache_core)
     add_test(NAME core_tests COMMAND cache_tests)
+    add_executable(classifier_failure_tests tests/test_classifier_failures.c src/trace.c)
+    target_include_directories(classifier_failure_tests PRIVATE include)
+    add_test(NAME allocation_failure_tests COMMAND classifier_failure_tests)
     add_test(NAME cli_tests COMMAND ${CMAKE_COMMAND}
         "-DAPP=$<TARGET_FILE:cpu_cache_simulator>"
         "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli-fixtures"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.cmake")
 endif()
-foreach(target cache_core cpu_cache_simulator cache_tests)
+foreach(target cache_core cpu_cache_simulator cache_tests classifier_failure_tests)
     if(TARGET ${target})
         if(MSVC)
             target_compile_options(${target} PRIVATE /W4 /utf-8)
