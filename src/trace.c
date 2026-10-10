@@ -29,19 +29,39 @@ int parse_trace_line(const char *line, MemoryAccess *access) {
     return 1;
 }
 int process_trace_file(Cache *cache, const char *filename, CacheStats *stats) {
+    return process_trace_file_ex(cache, filename, stats, NULL, NULL);
+}
+int process_trace_file_ex(Cache *cache, const char *filename, CacheStats *stats,
+    MissClassifier *classifier, MissBreakdown *breakdown) {
     FILE *file = fopen(filename, "rb");
     int ok;
     memset(stats, 0, sizeof(*stats));
+    if (breakdown) memset(breakdown, 0, sizeof(*breakdown));
     if (!file) { fprintf(stderr, "Error: cannot open trace file: %s\n", filename); return 0; }
-    ok = process_trace_stream(cache, file, stats, 1, 1);
+    ok = process_trace_stream_ex(cache, file, stats, classifier, breakdown, 1, 1);
     if (fclose(file) != 0) { fprintf(stderr, "Error: failed to close trace file.\n"); ok = 0; }
     return ok;
 }
 int process_trace_stream(Cache *cache, FILE *file, CacheStats *stats, int verbose, int warnings) {
+    return process_trace_stream_ex(cache, file, stats, NULL, NULL, verbose, warnings);
+}
+int process_trace_stream_ex(Cache *cache, FILE *file, CacheStats *stats,
+    MissClassifier *classifier, MissBreakdown *breakdown, int verbose, int warnings) {
     char line[1024];
     uint64_t line_number = 0;
     int ch, ok = 1;
     memset(stats, 0, sizeof(*stats));
+    if (breakdown) memset(breakdown, 0, sizeof(*breakdown));
+    if ((classifier == NULL) != (breakdown == NULL) || (classifier &&
+        (cache->policy != REPLACEMENT_LRU || cache->clock || classifier->shadow_cache.clock ||
+         classifier->block_count || !classifier->shadow_cache.lines ||
+         classifier->shadow_cache.policy != REPLACEMENT_LRU ||
+         classifier->shadow_cache.set_count != 1 ||
+         classifier->shadow_cache.cache_size != cache->cache_size ||
+         classifier->shadow_cache.block_size != cache->block_size))) {
+        fprintf(stderr, "Error: classification requires matching cold LRU caches and a breakdown.\n");
+        return 0;
+    }
     /* Read bytes into a bounded line buffer, so embedded NUL cannot hide suffixes. */
     while ((ch = fgetc(file)) != EOF) {
         size_t length = 0;
@@ -63,6 +83,16 @@ int process_trace_stream(Cache *cache, FILE *file, CacheStats *stats, int verbos
             fprintf(stderr, "Error: access counter limit reached.\n"); ok = 0; break;
         }
         result = cache_access(cache, access.address);
+        if (classifier) {
+            MissType type;
+            if (!miss_classifier_access(classifier, access.address, result.hit, &type)) {
+                fprintf(stderr, "Error: 3C classification failed (allocation or counter limit); simulation aborted.\n");
+                ok = 0; break;
+            }
+            if (type == MISS_COMPULSORY) ++breakdown->compulsory;
+            else if (type == MISS_CAPACITY) ++breakdown->capacity;
+            else if (type == MISS_CONFLICT) ++breakdown->conflict;
+        }
         ++stats->total_accesses;
         if (access.type == ACCESS_READ) ++stats->read_accesses; else ++stats->write_accesses;
         if (result.hit) ++stats->hits; else ++stats->misses;

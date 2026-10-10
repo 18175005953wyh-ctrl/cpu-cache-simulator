@@ -1,0 +1,7 @@
+# Capacity=2 bytes, block-size=1, associativity=1, policy=lru.
+# Expected: compulsory=3, conflict=1, capacity=1; evictions=3.
+R 0
+R 2
+R 0
+R 1
+R 2

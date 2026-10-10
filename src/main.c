@@ -5,6 +5,7 @@
 #include <string.h>
 
 static void help(void) {
+    puts("Optional: --classify-misses (ordinary LRU only; seen-block set and fully-associative LRU shadow).");
     puts("CPU Cache Simulator v1.1\nUsage: cpu_cache_simulator --cache-size BYTES --block-size BYTES\n       --associativity WAYS --trace FILE [--policy lru|fifo] [--report FILE]\n       cpu_cache_simulator --sets COUNT --ways WAYS --block-size BYTES\n       [--compare-policies [--csv FILE]] TRACE\nPolicies are lowercase; default lru. Sizes are positive decimal integers.\nComparison uses cold caches and identical input. Create output directories first.\nUse a new output filename. Trace: R/W followed by a hexadecimal address.");
 }
 static int parse_size(const char *s, size_t *value) {
@@ -66,9 +67,15 @@ int main(int argc, char **argv) {
     size_t capacity = 0, block, ways, sets = 0;
     Cache cache;
     CacheStats stats;
-    int i, j, ok, comparison = 0;
+    MissClassifier classifier = {0};
+    MissBreakdown breakdown = {0};
+    int i, j, ok, comparison = 0, classify = 0;
     if (argc == 2 && strcmp(argv[1], "--help") == 0) { help(); return 0; }
     for (i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--classify-misses") == 0) {
+            if (classify) { fprintf(stderr, "Error: duplicate --classify-misses option.\n"); return 1; }
+            classify = 1; continue;
+        }
         if (strcmp(argv[i], "--compare-policies") == 0) {
             if (comparison) { fprintf(stderr, "Error: duplicate comparison option.\n"); return 1; }
             comparison = 1; continue;
@@ -102,14 +109,23 @@ int main(int argc, char **argv) {
     }
     if ((comparison && (values[5] || values[4])) || (!comparison && values[7])) { fprintf(stderr, "Error: comparison accepts --csv, not --policy or --report; --csv requires comparison.\n"); return 1; }
     if ((values[4] && strcmp(values[3], values[4]) == 0) || (values[7] && strcmp(values[3], values[7]) == 0)) { fprintf(stderr, "Error: output and trace paths must differ.\n"); return 1; }
+    if (classify && comparison) { fprintf(stderr, "Error: --classify-misses cannot be used with --compare-policies.\n"); return 1; }
+    if (classify && policy != REPLACEMENT_LRU) { fprintf(stderr, "Error: 3C miss classification requires LRU policy.\n"); return 1; }
     if (comparison) return compare(capacity, block, ways, values[3], values[7]) ? 0 : 1;
     if (!cache_init_policy(&cache, capacity, block, ways, policy)) { fprintf(stderr, "Error: cannot allocate cache metadata.\n"); return 1; }
+    if (classify && !miss_classifier_init(&classifier, &cache)) {
+        fprintf(stderr, "Error: cannot allocate 3C classification state.\n");
+        miss_classifier_destroy(&classifier); cache_destroy(&cache); return 1;
+    }
     print_configuration(&cache);
-    ok = process_trace_file(&cache, values[3], &stats);
+    ok = process_trace_file_ex(&cache, values[3], &stats,
+        classify ? &classifier : NULL, classify ? &breakdown : NULL);
     if (ok) {
         print_summary(&cache, &stats);
-        if (values[4]) ok = write_report(values[4], &cache, &stats, values[3]);
+        if (classify) print_miss_breakdown(&breakdown, &stats);
+        if (values[4]) ok = write_report_ex(values[4], &cache, &stats, values[3], classify ? &breakdown : NULL);
     }
+    miss_classifier_destroy(&classifier);
     cache_destroy(&cache);
     return ok ? 0 : 1;
 }

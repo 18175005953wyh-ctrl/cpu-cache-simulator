@@ -212,9 +212,155 @@ static void fifo_reference_test(void) {
     }
     CHECK("4000 accesses match independent FIFO queue and invariants", ok);
 }
+static void classifier_set_tests(void) {
+    Cache actual;
+    MissClassifier c;
+    int seen, ok = 1;
+    size_t i;
+    if (!cache_init(&actual, 2, 1, 1) || !miss_classifier_init(&c, &actual)) {
+        CHECK("classifier set setup", 0); cache_destroy(&actual); return;
+    }
+    CHECK("shadow matches capacity with one LRU set", c.shadow_cache.cache_size == 2 &&
+        c.shadow_cache.block_size == 1 && c.shadow_cache.set_count == 1 &&
+        c.shadow_cache.associativity == 2 && c.shadow_cache.policy == REPLACEMENT_LRU);
+    CHECK("set initially has 16 slots", c.table_capacity == 16 && c.block_count == 0);
+    CHECK("set stores block zero", miss_classifier_record_block(&c, 0, &seen) && !seen);
+    CHECK("set stores UINT64_MAX", miss_classifier_record_block(&c, UINT64_MAX, &seen) && !seen);
+    CHECK("duplicate does not increase count", miss_classifier_record_block(&c, 0, &seen) && seen && c.block_count == 2);
+    for (i = 1; i <= 1000; ++i)
+        if (!miss_classifier_record_block(&c, (uint64_t)i, &seen) || seen) ok = 0;
+    CHECK("set grows with power of two capacity", ok && c.block_count == 1002 && c.table_capacity > 16 && is_power_of_two(c.table_capacity));
+    for (i = 0; i <= 1000; ++i)
+        if (!miss_classifier_record_block(&c, (uint64_t)i, &seen) || !seen) ok = 0;
+    CHECK("rehash retains all keys including maximum", ok && miss_classifier_record_block(&c, UINT64_MAX, &seen) && seen && c.block_count == 1002);
+    miss_classifier_destroy(&c); miss_classifier_destroy(&c);
+    CHECK("classifier repeated destroy safe", !c.seen_blocks && !c.occupied && !c.shadow_cache.lines);
+    (void)cache_access(&actual, 0);
+    CHECK("warm cache initialization rejected", !miss_classifier_init(&c, &actual));
+    miss_classifier_destroy(&c); cache_destroy(&actual);
+    if (!cache_init_policy(&actual, 2, 1, 1, REPLACEMENT_FIFO)) { CHECK("FIFO setup", 0); return; }
+    CHECK("FIFO initialization rejected and destroyable", !miss_classifier_init(&c, &actual) && !c.shadow_cache.lines && !c.occupied);
+    miss_classifier_destroy(&c); cache_destroy(&actual);
+}
+static void classifier_access_tests(void) {
+    Cache actual;
+    MissClassifier c;
+    MissType type;
+    const uint64_t sequence[] = {0, 2, 0, 1, 2};
+    const MissType expected[] = {MISS_COMPULSORY, MISS_COMPULSORY, MISS_CONFLICT, MISS_COMPULSORY, MISS_CAPACITY};
+    const char *names[] = {"first block compulsory", "second block compulsory", "shadow hit means conflict", "new block compulsory even on eviction", "shadow miss means capacity"};
+    size_t i;
+    if (!cache_init(&actual, 2, 1, 1) || !miss_classifier_init(&c, &actual)) { CHECK("access setup", 0); cache_destroy(&actual); return; }
+    for (i = 0; i < 5; ++i) {
+        AccessResult r = cache_access(&actual, sequence[i]);
+        CHECK(names[i], miss_classifier_access(&c, sequence[i], r.hit, &type) && type == expected[i]);
+    }
+    CHECK("actual hit yields NONE", miss_classifier_access(&c, 2, cache_access(&actual, 2).hit, &type) && type == MISS_NONE);
+    CHECK("hits advance shadow clock", c.shadow_cache.clock == actual.clock && actual.clock == 6);
+    c.shadow_cache.clock = UINT64_MAX;
+    CHECK("shadow counter overflow rejected", !miss_classifier_access(&c, 2, 1, &type));
+    miss_classifier_destroy(&c); cache_destroy(&actual);
+    if (!cache_init(&actual, 32, 16, 1) || !miss_classifier_init(&c, &actual)) { CHECK("offset setup", 0); cache_destroy(&actual); return; }
+    (void)miss_classifier_access(&c, 0, cache_access(&actual, 0).hit, &type);
+    CHECK("different offsets are one seen block", miss_classifier_access(&c, 15, cache_access(&actual, 15).hit, &type) && type == MISS_NONE && c.block_count == 1);
+    miss_classifier_destroy(&c); cache_destroy(&actual);
+}
+static void classified_trace_case(const char *name, const char *text, size_t ways,
+    uint64_t compulsory, uint64_t capacity, uint64_t conflict, uint64_t hits, uint64_t evictions) {
+    Cache actual;
+    MissClassifier c;
+    CacheStats stats;
+    MissBreakdown b;
+    FILE *f = tmpfile();
+    int ok;
+    if (!f) { CHECK(name, 0); return; }
+    if (!cache_init(&actual, 2, 1, ways) || !miss_classifier_init(&c, &actual)) {
+        CHECK(name, 0); cache_destroy(&actual); fclose(f); return;
+    }
+    fputs(text, f); rewind(f);
+    ok = process_trace_stream_ex(&actual, f, &stats, &c, &b, 0, 0);
+    CHECK(name, ok && b.compulsory == compulsory && b.capacity == capacity && b.conflict == conflict &&
+        stats.hits == hits && stats.evictions == evictions && stats.misses == compulsory + capacity + conflict &&
+        stats.hits + stats.misses == stats.total_accesses && stats.evictions <= stats.misses &&
+        c.block_count == compulsory && c.shadow_cache.clock == stats.total_accesses);
+    fclose(f); miss_classifier_destroy(&c); cache_destroy(&actual);
+}
+/* Independent arrays: no Cache or classifier calls to calculate expectations. */
+static int reference_lru(uint64_t *recent, size_t *used, size_t capacity, uint64_t block) {
+    size_t pos, move;
+    int hit;
+    for (pos = 0; pos < *used && recent[pos] != block; ++pos) { }
+    hit = pos < *used;
+    if (!hit && *used < capacity) ++*used;
+    move = hit ? pos : *used - 1;
+    for (; move; --move) recent[move] = recent[move - 1];
+    recent[0] = block;
+    return hit;
+}
+static void classifier_reference_test(void) {
+    size_t ways;
+    int ok = 1;
+    for (ways = 1; ways <= 4; ++ways) {
+        uint64_t sets[4][4] = {{0}}, shadow[16] = {0};
+        unsigned char seen[64] = {0};
+        size_t used[4] = {0}, shadow_used = 0;
+        uint32_t seed = 987;
+        Cache actual;
+        MissClassifier c;
+        uint64_t misses = 0, counts[4] = {0}, expected_counts[4] = {0};
+        int step;
+        if (!cache_init(&actual, 4 * ways, 1, ways) || !miss_classifier_init(&c, &actual)) { ok = 0; cache_destroy(&actual); break; }
+        for (step = 0; step < 1000; ++step) {
+            uint64_t block;
+            size_t set;
+            int hit, shadow_hit;
+            MissType expected, type;
+            AccessResult r;
+            seed = seed * UINT32_C(1664525) + UINT32_C(1013904223);
+            block = (seed >> 16) % 64; set = (size_t)(block % 4);
+            hit = reference_lru(sets[set], &used[set], ways, block);
+            shadow_hit = reference_lru(shadow, &shadow_used, 4 * ways, block);
+            expected = hit ? MISS_NONE : (!seen[block] ? MISS_COMPULSORY : (shadow_hit ? MISS_CONFLICT : MISS_CAPACITY));
+            seen[block] = 1; ++expected_counts[expected];
+            r = cache_access(&actual, block);
+            if (!r.hit) ++misses;
+            if (!miss_classifier_access(&c, block, r.hit, &type)) { ok = 0; break; }
+            ++counts[type];
+            if (r.hit != hit || type != expected) ok = 0;
+        }
+        if (memcmp(counts, expected_counts, sizeof(counts)) || counts[1] + counts[2] + counts[3] != misses) ok = 0;
+        miss_classifier_destroy(&c); cache_destroy(&actual);
+    }
+    CHECK("4000 classifications match independent seen and LRU arrays", ok);
+}
+static void classifier_trace_tests(void) {
+    Cache actual;
+    MissClassifier c;
+    CacheStats stats;
+    MissBreakdown b;
+    FILE *f;
+    classified_trace_case("fixed trace gives 3 compulsory 1 capacity 1 conflict", "R 0\nR 2\nR 0\nR 1\nR 2\n", 1, 3, 1, 1, 0, 3);
+    classified_trace_case("fully associative conflict zero", "R 0\nR 2\nR 0\nR 1\nR 2\n", 2, 3, 1, 0, 1, 2);
+    classified_trace_case("unique blocks compulsory only", "R 0\nR 1\nR 2\nR 3\n", 1, 4, 0, 0, 0, 2);
+    classified_trace_case("empty classification", "", 1, 0, 0, 0, 0, 0);
+    classified_trace_case("single compulsory no eviction", "R 0\n", 1, 1, 0, 0, 0, 0);
+    classified_trace_case("invalid rows never enter seen set", "X 0\nR 0 junk\nR 0\nW -1\n", 1, 1, 0, 0, 0, 0);
+    classified_trace_case("R and W classification equivalent", "W 0\nR 2\nW 0\nW 1\nR 2\n", 1, 3, 1, 1, 0, 3);
+    classified_trace_case("hit updates shadow LRU before next eviction", "R 0\nR 1\nR 0\nR 3\nR 0\nR 1\n", 1, 3, 1, 0, 2, 2);
+    classified_trace_case("maximum address valid in trace", "R ffffffffffffffff\nR 0\nR ffffffffffffffff\n", 1, 2, 0, 0, 1, 0);
+    f = tmpfile();
+    if (!f || !cache_init(&actual, 2, 1, 1)) { CHECK("trace guards setup", 0); if (f) fclose(f); return; }
+    if (!miss_classifier_init(&c, &actual)) { CHECK("trace guards classifier", 0); cache_destroy(&actual); fclose(f); return; }
+    CHECK("missing breakdown rejected", !process_trace_stream_ex(&actual, f, &stats, &c, NULL, 0, 0));
+    CHECK("missing classifier rejected", !process_trace_stream_ex(&actual, f, &stats, NULL, &b, 0, 0));
+    (void)cache_access(&actual, 0);
+    CHECK("warm classification stream rejected", !process_trace_stream_ex(&actual, f, &stats, &c, &b, 0, 0));
+    miss_classifier_destroy(&c); cache_destroy(&actual); fclose(f);
+}
 int main(void) {
     configuration_tests(); mapping_tests(); associative_tests(); parsing_tests(); reference_test(); file_tests();
     policy_tests(); fifo_reference_test();
+    classifier_set_tests(); classifier_access_tests(); classifier_trace_tests(); classifier_reference_test();
     printf("\n%d tests passed, %d tests failed.\n", tests - failures, failures);
     return failures ? 1 : 0;
 }

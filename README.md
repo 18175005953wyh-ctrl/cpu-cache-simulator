@@ -16,6 +16,7 @@
 - R/W 都会更新 LRU；写缺失按**写分配**载入块。不模拟写直达、脏位或写回流量。
 - 每条有效访问显示序号、类型、64 位地址、命中/缺失、替换、组索引、Tag 和偏移。
 - 统计读写次数、Hit、Miss、Eviction 及比例，支持带 UTC 时间的文本报告。
+- 可选 `--classify-misses`：普通 LRU 模式下分析强制、容量和冲突缺失，终端与文本报告使用同一输出函数。
 - 检查参数、数值溢出、文件错误、损坏记录和超长行；错误记录带物理行号警告并跳过。
 
 ## Cache 基础
@@ -206,6 +207,7 @@ ctest --test-dir build --output-on-failure
 | `--compare-policies` | 用同配置、同输入分别运行 LRU/FIFO，不与 `--policy`、`--report` 混用 |
 | `--csv` | 仅用于比较模式，新 CSV 文件路径 |
 | `--report` | 可选，新报告文件路径 |
+| `--classify-misses` | 无值开关，仅普通 LRU 模式，输出 3C 缺失分类；不能重复或与 FIFO、策略比较混用 |
 | `--help` | 单独使用，显示帮助 |
 
 容量或组数、块大小、路数使用十进制正整数，不接受符号、小数或后缀。缓存配置与 Trace 都必须提供；重复、未知及缺值参数返回非零。
@@ -282,6 +284,28 @@ Miss rate:         60.00%
 
 ## Test Coverage
 
+2026-10-10 新增 3C 后，在 Windows x64、MSVC 19.44、NMake Debug、`/W4 /WX` 下实测：
+**84 项核心检查 + 6 项分配失败检查 + 66 项 CLI 检查 = 156 项全部通过**。
+原有 52 + 47 = 99 项保留，新增 57 项。CTest 有三个入口，不等于只有三个检查。
+
+原始测试输出节选：
+
+```text
+84 tests passed, 0 tests failed.
+6 allocation failure tests passed, 0 failed.
+-- 66 CLI tests passed
+100% tests passed, 0 tests failed out of 3
+```
+
+新增覆盖：同块偏移、三类判定、全相联冲突为零、空/单次/无效/RW记录、0 和 UINT64_MAX 键、
+重复插入、多次扩容、冷状态约束、影子缓存命中更新、时钟上限、CLI 拒绝组合和终端/报告一致性。
+固定种子的独立数组参考模型逐次核对 4,000 次分类；预期值不调用生产分类器或缓存实现。
+独立测试程序替换内存分配函数，注入初始化的三处分配失败、扩容的两处分配失败，
+以及 trace 运行中扩容失败，验证错误传播、旧记录保留、可重试扩容和安全释放。
+
+`.github/workflows/tests.yml` 在 push、pull request 或手动触发时运行 Ubuntu 和 Windows Debug 严格构建与 CTest。
+远程 CI 状态待实际运行确认；本地通过不代表远程已通过。
+
 测试不依赖第三方框架，使用会在 Release 模式下保留的 CHECK 宏；失败返回非零，CTest 能发现失败。
 
 2026-09-27 在 Windows x64、MSVC 19.44、NMake Debug、`/W4 /WX` 下实测：**52 项 C 测试 + 47 项命令行测试全部通过**，CTest 两个入口均通过。原有 36 + 24 项保留；新增 16 + 23 项。
@@ -307,7 +331,7 @@ ctest --test-dir build-v11 --output-on-failure
 
 - 每条记录只代表对一个地址所在块的一次访问，不包含访问长度和跨块拆分。
 - 只模拟一个 Cache 层级，初始为空；不保存数据，不模拟脏位、写回、时延、一致性和地址转换。
-- 所有缺失统一计为 Miss，尚未区分冷、容量与冲突缺失；报告不包含逐条记录，终端包含。
+- 默认仅统计总 Miss；显式启用 `--classify-misses` 才进行 LRU 的 3C 分类。报告不包含逐条记录，终端包含。
 - 最多 1,048,576 行；最多处理 UINT64_MAX 次有效访问，达到时钟上限后明确停止，避免 LRU/FIFO 时间戳回绕。
 - 库接口要求先初始化、用后销毁；重新初始化前需先销毁。直接调用 `cache_access` 时调用方须保证时钟尚未到上限，文件处理函数已经检查。
 - 对照模式需要可写的系统临时目录及容纳 Trace 快照的磁盘空间；两次扫描共享快照，逐行解析，内存不随 Trace 大小增长。
@@ -328,4 +352,103 @@ ctest --test-dir build-v11 --output-on-failure
 7. **组相联的优缺点？** 同组能保存多个块，减少部分冲突；但需更多比较和替换管理，并非相联度越高就一定更快。
 8. **LRU 为什么记录最近使用时间？** 需要区分谁最久未被访问，满组时才知道替换谁。只更新缺失而不更新命中会变成错误策略。
 9. **时间复杂度是多少？** 每次访问组内最多检查 E 行，为 O(E)，不是所有配置都 O(1)。处理 M 次访问为 O(ME)，另有文本读取和输出成本。
-10. **如何升级？** v1.1 已实现 FIFO 与对照实验；下一步先解释已有实验与局限，再考虑新的模拟维度。
+10. **怎样区分 3C 缺失？** seen 集合判断是否第一次访问块；同容量全相联 LRU 影子缓存用于区分非首次缺失中的容量和映射冲突。
+
+## 3C Miss Classification
+
+### Compulsory Miss
+
+强制缺失：实际缓存 miss，且该块第一次出现。集合记录 `address / block_size`，
+不是字节地址；块大小 16 时，地址 `0x00` 和 `0x0f` 属于同一个块。
+
+### Capacity Miss
+
+容量缺失：实际缓存 miss，块曾出现过，同容量全相联 LRU 影子缓存也 miss。
+在这个参考模型下，消除组映射限制后仍不能保留该块。
+
+### Conflict Miss
+
+冲突缺失：实际缓存 miss，块曾出现过，但影子缓存 hit。
+它描述相对于全相联 LRU 参考模型的映射冲突，不是把所有 eviction 都视为冲突。
+
+### Shadow Cache Method
+
+`miss_classifier.c` 复用原有 `cache_init_policy`/`cache_access`，创建容量、块大小相同、
+一个 set、ways 等于总行数、策略为 LRU 的影子缓存。每次有效访问都更新影子状态，
+包括实际缓存命中的访问；实际 hit 返回 `MISS_NONE`，不会增加任何分类计数。
+
+开放寻址集合使用独立 occupied 数组，因此 0 和 UINT64_MAX 都是合法 key。
+初始 16 槽、容量为 2 的幂，约 70% 负载时扩容并重新散列，检查乘法及翻倍溢出。
+分配失败保留原集合并返回失败；trace 处理停止，CLI 非零退出，不输出成功的部分汇总。
+
+分类仅允许冷缓存、从 trace 开头运行。扩展的 `process_trace_file_ex`、
+`process_trace_stream_ex` 接受可选分类器；原接口传 NULL 包装调用，旧调用者不用创建分类器。
+普通模式不分配影子缓存或 seen 集合，原来的 LRU/FIFO 对照结果保持不变。
+`miss_classifier_record_block` 暴露用于集合独立测试；正常运行只调用 `miss_classifier_access`，
+不能手动预填集合再进行分类。初始化前无需清零，重新初始化前必须 destroy。
+
+## Reproducible 3C Experiment
+
+### Fixed Configuration
+
+固定容量 **2 字节**、块大小 **1 字节**、相联度 **1**（两组直接映射）、LRU、冷缓存、write-allocate。
+`data/three_c.trace` 的有效块序列是 `0,2,0,1,2`。不要用 64/16 的配置复现下面的 3/1/1 数字。
+
+在 x64 Native Tools Command Prompt 中、项目根目录运行：
+
+```bat
+cmake -S . -B build-3c -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Debug -DSTRICT_WARNINGS=ON
+cmake --build build-3c --config Debug
+ctest --test-dir build-3c -C Debug --output-on-failure -V
+build-3c\cpu_cache_simulator.exe --cache-size 2 --block-size 1 --associativity 1 --policy lru --classify-misses --trace data/three_c.trace --report output/three-c-report.txt
+```
+
+报告文件必须尚不存在。现有 `build-v11` 也可构建和运行本版本。Linux 使用通用 CMake 命令，
+可执行文件路径为 `./build/cpu_cache_simulator`；Visual Studio 多配置构建为 `build/Debug/cpu_cache_simulator.exe`。
+
+### Trace Walkthrough
+
+影子状态按最近使用 → 最久未用排列：
+
+| 访问块 | 实际结果 | 访问后影子状态 | 类别与原因 |
+|---:|---|---|---|
+| 0 | miss | 0 | compulsory，首次出现 |
+| 2 | miss，淘汰 0 | 2, 0 | compulsory，首次出现，虽同时发生淘汰 |
+| 0 | miss，淘汰 2 | 0, 2 | conflict，访问前影子仍包含 0 |
+| 1 | miss，填空行 | 1, 0 | compulsory，首次出现；影子淘汰 2 |
+| 2 | miss，淘汰 0 | 2, 1 | capacity，访问前影子也没有 2 |
+
+### Actual Results
+
+2026-10-10 使用上述固定配置实际运行：
+
+| Miss Type | Count | Percentage |
+|---|---:|---:|
+| Compulsory | 3 | 60.00% |
+| Capacity | 1 | 20.00% |
+| Conflict | 1 | 20.00% |
+
+```text
+Total accesses:    5
+Hits:              0
+Misses:            5
+Evictions:         3
+
+===== 3C Miss Classification =====
+Compulsory misses: 3 (60.00% of misses)
+Capacity misses:   1 (20.00% of misses)
+Conflict misses:   1 (20.00% of misses)
+Classified misses: 5
+Classification model: seen-block set + same-capacity fully-associative LRU shadow cache
+```
+
+### Invariants and Limitations
+
+- `hits + misses == total_accesses`，`compulsory + capacity + conflict == misses`，`evictions <= misses`。
+- 同配置全相联实际 LRU 缓存的 conflict 为 0。只把上述配置的相联度改成 2，实测为 1 hit、4 misses、2 evictions，分类为 3/1/0。
+- `capacity + conflict` 不等于 eviction：本例前者为 2，后者为 3，首次访问也可能引发淘汰。
+- 仅支持普通 LRU 模式的标准 3C 参考分类；FIFO、策略比较、重复开关均报错，不偷偷套用另一策略的参考结果。
+- 无有效访问时三类为 0，比例显示 N/A；无效 trace 行完全不进入分类器。读写均按现有 write-allocate 规则处理。
+- seen 集合随不同块数量 U 增长，平均查找 O(1)，空间 O(U)；影子 LRU 每次扫描总行数 L，分类模式总时间约 O(M(E+L))，元数据 O(U+L)。
+- 实际组相联 LRU 有时也可能命中而全相联 LRU 缺失；此时记录 MISS_NONE，仍更新影子状态。容量计数不是简单照抄影子缓存的总缺失数。
+- 分类只适用于本 trace 和固定配置，不是硬件性能或代码质量评分，不包含多级缓存、预取、脏块和写回。
