@@ -304,7 +304,7 @@ Miss rate:         60.00%
 以及 trace 运行中扩容失败，验证错误传播、旧记录保留、可重试扩容和安全释放。
 
 `.github/workflows/tests.yml` 在 push、pull request 或手动触发时运行 Ubuntu 和 Windows Debug 严格构建与 CTest。
-远程 CI 状态待实际运行确认；本地通过不代表远程已通过。
+2026-10-10，合并后的 main 分支已通过 GitHub Actions 验证：Ubuntu 和 Windows 的 Debug 严格构建及全部自动化检查均成功。
 
 测试不依赖第三方框架，使用会在 Release 模式下保留的 CHECK 宏；失败返回非零，CTest 能发现失败。
 
